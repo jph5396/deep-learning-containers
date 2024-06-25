@@ -2,12 +2,42 @@ from packaging.version import Version
 from packaging.specifiers import SpecifierSet
 
 import pytest
+import re
 
 from invoke.context import Context
 
 from test import test_utils
 
-UTILITY_PACKAGES_IMPORT = ["bokeh", "imageio", "plotly", "seaborn", "shap", "pandas", "cv2", "sagemaker"]
+SM_TRAINING_UTILITY_PACKAGES_IMPORT = [
+    "bokeh",
+    "imageio",
+    "plotly",
+    "seaborn",
+    "shap",
+    "pandas",
+    "cv2",
+    "sagemaker",
+]
+
+COMMON_PYTORCH_TRAINING_UTILITY_PACKAGES_IMPORT = [
+    "torch",
+    "torchvision",
+    "torchtext",
+    "torchaudio",
+    "PIL",
+    "boto3",
+    "awscli",
+    "scipy",
+    "requests",
+    "IPython",
+    "ipykernel",
+    "cryptography",
+    "mpi4py",
+    "pybind11",
+    "click",
+    "psutil",
+    "cv2",
+]
 
 
 # TODO: Need to be added to all DLC images in furture.
@@ -37,7 +67,7 @@ def test_utility_packages_using_import(training):
     Verify that utility packages are installed in the Training DLC image
     :param training: training ECR image URI
     """
-    #TODO: revert once habana is supported on SM
+    # TODO: revert once habana is supported on SM
     if "hpu" in training:
         pytest.skip("Skipping test for Habana images as SM is not yet supported")
 
@@ -62,14 +92,70 @@ def test_utility_packages_using_import(training):
     if Version(framework_version) < Version(utility_package_minimum_framework_version[framework]):
         pytest.skip("Extra utility packages will be added going forward.")
 
-    packages_to_import = UTILITY_PACKAGES_IMPORT
+    packages_to_import = SM_TRAINING_UTILITY_PACKAGES_IMPORT
 
     for package in packages_to_import:
-        version = test_utils.run_cmd_on_container(
-            container_name, ctx, f"import {package}; print({package}.__version__)", executable="python"
-        ).stdout.strip()
+        version = re.search(
+            r"\d+(\.\d+)+",
+            test_utils.run_cmd_on_container(
+                container_name,
+                ctx,
+                f"import {package}; print({package}.__version__)",
+                executable="python",
+            ).stdout,
+        ).group()
+        test_utils.LOGGER.info(f"The {package} Version is {version}")
         if package == "sagemaker":
-            assert Version(version) > Version("2"), f"Sagemaker version should be > 2.0. Found version {version}"
+            assert Version(version) > Version(
+                "2"
+            ), f"Sagemaker version should be > 2.0. Found version {version}"
+
+
+@pytest.mark.model("N/A")
+@pytest.mark.usefixtures("sagemaker")
+@pytest.mark.integration("common pytorch training utility packages")
+def test_common_pytorch_utility_packages_using_import(pytorch_training):
+    """
+    Verify that common utility packages are installed in the Training DLC image
+    :param pytorch_training: training ECR image URI
+    """
+
+    ctx = Context()
+    container_name = test_utils.get_container_name(
+        "common_pytorch_utility_packages_using_import", pytorch_training
+    )
+    test_utils.start_container(container_name, pytorch_training, ctx)
+    packages_to_import = COMMON_PYTORCH_TRAINING_UTILITY_PACKAGES_IMPORT.copy()
+
+    # Exceptions for certain types of PyTorch Training DLCs
+    _, framework_version = test_utils.get_framework_and_version_from_tag(pytorch_training)
+    if Version(framework_version) < Version("2.0"):
+        # These packages are only installed for PT versions >=2.0
+        for package_name in ["torchtext", "ipykernel"]:
+            packages_to_import.remove(package_name)
+        if test_utils.get_processor_from_image_uri(pytorch_training) == "cpu":
+            for package_name in ["pybind11", "mpi4py"]:
+                packages_to_import.remove(package_name)
+        elif test_utils.is_ec2_image(pytorch_training):
+            for package_name in ["pybind11"]:
+                packages_to_import.remove(package_name)
+
+    import_failed = False
+    list_of_packages = []
+    for package in packages_to_import:
+        try:
+            test_utils.run_cmd_on_container(
+                container_name,
+                ctx,
+                f"import {package}; print({package}.__version__)",
+                executable="python",
+            )
+        except Exception as e:
+            import_failed = True
+            list_of_packages.append(package)
+
+    if import_failed:
+        raise ImportError(f"Import failed for packages: {list_of_packages}")
 
 
 @pytest.mark.usefixtures("sagemaker")
@@ -111,22 +197,33 @@ def test_emacs(image):
 @pytest.mark.model("N/A")
 @pytest.mark.integration("sagemaker_studio_analytics_extension")
 @pytest.mark.parametrize(
-    "package_name", ["pyhive", "sparkmagic", "sagemaker-studio-sparkmagic-lib", "sagemaker-studio-analytics-extension"]
+    "package_name",
+    [
+        "pyhive",
+        "sparkmagic",
+        "sagemaker-studio-sparkmagic-lib",
+        "sagemaker-studio-analytics-extension",
+    ],
 )
 def test_sagemaker_studio_analytics_extension(training, package_name):
     framework, framework_version = test_utils.get_framework_and_version_from_tag(training)
     utility_package_framework_version_limit = {
-        "pytorch": SpecifierSet(">=1.7,<1.9"), "tensorflow": SpecifierSet(">=2.4,<2.7,!=2.5.*")
+        "pytorch": SpecifierSet(">=1.7,<1.9"),
+        "tensorflow": SpecifierSet(">=2.4,<2.7,!=2.5.*"),
     }
 
     if (
         framework not in utility_package_framework_version_limit
         or Version(framework_version) not in utility_package_framework_version_limit[framework]
     ):
-        pytest.skip(f"sagemaker_studio_analytics_extension is not installed in {framework} {framework_version} DLCs")
+        pytest.skip(
+            f"sagemaker_studio_analytics_extension is not installed in {framework} {framework_version} DLCs"
+        )
 
     ctx = Context()
-    container_name = test_utils.get_container_name(f"sagemaker_studio_analytics_extension-{package_name}", training)
+    container_name = test_utils.get_container_name(
+        f"sagemaker_studio_analytics_extension-{package_name}", training
+    )
     test_utils.start_container(container_name, training, ctx)
 
     # Optionally add version validation in the following steps, rather than just printing it.
@@ -134,7 +231,32 @@ def test_sagemaker_studio_analytics_extension(training, package_name):
     import_package = package_name.replace("-", "_")
     import_test_cmd = (
         f"import {import_package}"
-        if package_name in ["sagemaker-studio-sparkmagic-lib", "sagemaker-studio-analytics-extension"]
+        if package_name
+        in ["sagemaker-studio-sparkmagic-lib", "sagemaker-studio-analytics-extension"]
         else f"import {import_package}; print({import_package}.__version__)"
     )
     test_utils.run_cmd_on_container(container_name, ctx, import_test_cmd, executable="python")
+
+
+@pytest.mark.usefixtures("sagemaker_only")
+@pytest.mark.model("N/A")
+@pytest.mark.integration("ipykernel")
+def test_ipykernel_presence(tensorflow_training):
+    """
+    ipykernel installed by sagemaker-studio-sparkmagic-lib package should be removed in order to make the DLC compatible with SM studio
+    """
+    try:
+        image = tensorflow_training
+        ctx = Context()
+        container_name = test_utils.get_container_name("ipykernel", image)
+        test_utils.start_container(container_name, image, ctx)
+        command = 'SYSTEM_PYTHON_PREFIX=$(python -c "from __future__ import print_function;import sys; print(sys.prefix)") && ls $SYSTEM_PYTHON_PREFIX/share/jupyter/kernels/python3/kernel.json'
+        command_output = test_utils.run_cmd_on_container(container_name, ctx, command, warn=True)
+        command_stdout = command_output.stdout.strip()
+        if command_output.return_code == 0:
+            raise RuntimeError(
+                f"Image {image} contains ipykernel at location: {command_stdout} "
+                f"Please ensure that the ipykernel is removed"
+            )
+    finally:
+        test_utils.stop_and_remove_container(container_name, ctx)

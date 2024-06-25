@@ -2,8 +2,14 @@ import json
 import pytest
 
 from invoke.context import Context
-
-from test.test_utils import is_pr_context, PR_ONLY_REASON
+from packaging.version import Version
+from packaging.specifiers import SpecifierSet
+from test.test_utils import (
+    is_pr_context,
+    PR_ONLY_REASON,
+    is_trcomp_image,
+    get_framework_and_version_from_tag,
+)
 
 
 @pytest.mark.usefixtures("sagemaker")
@@ -17,8 +23,18 @@ def test_binary_visibility(image: str):
     fail if an 'https://' link is still private
     """
 
+    framework, version = get_framework_and_version_from_tag(image)
+    if (
+        is_trcomp_image(image)
+        and framework == "huggingface_tensorflow_trcomp"
+        and Version(version) in SpecifierSet("==2.6.*")
+    ):
+        pytest.skip("Skipping test for HF TrComp Tensorflow 2.6 images")
+
     ctx = Context()
-    labels = json.loads(ctx.run("docker inspect --format='{{json .Config.Labels}}' " + image).stdout.strip())
+    labels = json.loads(
+        ctx.run("docker inspect --format='{{json .Config.Labels}}' " + image).stdout.strip()
+    )
 
     for label_name, label_value in labels.items():
         if "uri" in label_name.lower():

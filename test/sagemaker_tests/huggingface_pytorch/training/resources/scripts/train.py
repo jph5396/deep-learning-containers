@@ -1,16 +1,18 @@
-from transformers import AutoModelForSequenceClassification, Trainer, TrainingArguments
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-from datasets import load_dataset
-from transformers import AutoTokenizer
-import random
+import os
 import logging
 import sys
 import argparse
-import os
-import torch
+import evaluate
+import numpy as np
+from datasets import load_dataset
+from transformers import (
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    Trainer,
+    TrainingArguments,
+)
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser()
 
     # hyperparameters sent by the client are passed as command-line arguments to the script.
@@ -43,6 +45,7 @@ if __name__ == "__main__":
 
     # load dataset
     dataset = load_dataset("imdb")
+    metric = evaluate.load("accuracy")
 
     # tokenizer helper function
     def tokenize(batch):
@@ -50,7 +53,9 @@ if __name__ == "__main__":
 
     # load dataset
     train_dataset, test_dataset = load_dataset("imdb", split=["train", "test"])
-    test_dataset = test_dataset.shuffle().select(range(100))  # smaller the size for test dataset to 10k
+    test_dataset = test_dataset.shuffle().select(
+        range(100)
+    )  # smaller the size for test dataset to 10k
 
     # tokenize dataset
     train_dataset = train_dataset.map(tokenize, batched=True, batch_size=len(train_dataset))
@@ -66,16 +71,15 @@ if __name__ == "__main__":
     logger.info(f" loaded test_dataset length is: {len(test_dataset)}")
 
     # compute metrics function for binary classification
-    def compute_metrics(pred):
-        labels = pred.label_ids
-        preds = pred.predictions.argmax(-1)
-        precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average="binary")
-        acc = accuracy_score(labels, preds)
-        return {"accuracy": acc, "f1": f1, "precision": precision, "recall": recall}
+    def compute_metrics(eval_pred):
+        predictions, labels = eval_pred
+        predictions = np.argmax(predictions, axis=1)
+        return metric.compute(predictions=predictions, references=labels)
 
     # define training args
     training_args = TrainingArguments(
         output_dir=args.model_dir,
+        dataloader_drop_last=True,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.train_batch_size,
         per_device_eval_batch_size=args.eval_batch_size,
@@ -102,7 +106,7 @@ if __name__ == "__main__":
 
     # writes eval result to file which can be accessed later in s3 ouput
     with open(os.path.join(args.output_data_dir, "eval_results.txt"), "w") as writer:
-        print(f"***** Eval results *****")
+        print("***** Eval results *****")
         for key, value in sorted(eval_result.items()):
             writer.write(f"{key} = {value}\n")
 

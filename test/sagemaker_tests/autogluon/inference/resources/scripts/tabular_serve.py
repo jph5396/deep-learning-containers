@@ -7,7 +7,9 @@ from autogluon.tabular import TabularPredictor
 
 def model_fn(model_dir):
     """loads model from previously saved artifact"""
-    model = TabularPredictor.load(model_dir)
+    model = TabularPredictor.load(
+        model_dir, require_version_match=False, require_py_version_match=False
+    )
     globals()["column_names"] = model.feature_metadata_in.get_features()
 
     return model
@@ -20,7 +22,9 @@ def transform_fn(model, request_body, input_content_type, output_content_type="a
         num_cols = len(data.columns)
 
         if num_cols != len(column_names):
-            raise Exception(f"Invalid data format. Input data has {num_cols} while the model expects {len(column_names)}")
+            raise Exception(
+                f"Invalid data format. Input data has {num_cols} while the model expects {len(column_names)}"
+            )
 
         else:
             data.columns = column_names

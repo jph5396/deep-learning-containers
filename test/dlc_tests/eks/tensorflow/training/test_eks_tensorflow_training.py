@@ -10,6 +10,7 @@ import test.test_utils.eks as eks_utils
 
 @pytest.mark.integration("keras")
 @pytest.mark.model("mnist")
+@pytest.mark.team("frameworks")
 def test_eks_tensorflow_single_node_training(tensorflow_training):
     """
     Function to create a pod using kubectl and given container image, and run MXNet training
@@ -26,7 +27,7 @@ def test_eks_tensorflow_single_node_training(tensorflow_training):
     pod_name = f"tensorflow-single-node-training-{rand_int}"
 
     args = (
-        "git clone --branch tf-2 https://github.com/keras-team/keras "
+        "git clone --branch tf-keras https://github.com/keras-team/keras "
         "&& sed -i 's/import keras/from tensorflow import keras/g; "
         "s/from keras/from tensorflow.keras/g' /keras/examples/mnist_cnn.py "
         "&& python /keras/examples/mnist_cnn.py"

@@ -6,9 +6,10 @@ from botocore.exceptions import ClientError
 
 from test import test_utils
 import test.test_utils.ecs as ecs_utils
+import test.test_utils.ec2 as ec2_utils
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def ecs_client(region):
     return boto3.client("ecs", region_name=region)
 
@@ -42,7 +43,7 @@ def ecs_cluster(request, ecs_client, ecs_cluster_name, region):
     # Wait for cluster status to be active
     if ecs_utils.check_ecs_cluster_status(cluster_arn, "ACTIVE"):
         return cluster_arn
-    raise ecs_utils.ECSClusterCreationException(f'Failed to create ECS cluster - {cluster_name}')
+    raise ecs_utils.ECSClusterCreationException(f"Failed to create ECS cluster - {cluster_name}")
 
 
 @pytest.fixture(scope="function")
@@ -75,12 +76,55 @@ def ecs_ami(request):
 
 @pytest.fixture(scope="session")
 def ecs_instance_type(request):
-    return request.param
+    instance_type = request.param if hasattr(request, "param") else "g4dn.xlarge"
+    _restrict_instance_usage(instance_type)
+    return instance_type
+
+
+def _restrict_instance_usage(instance_type):
+    restricted_instances = {"c": ["c4"], "m": ["m4"], "p": ["p2"]}
+
+    for instance_serie, instance_list in restricted_instances.items():
+        for instance_family in instance_list:
+            if f"{instance_family}." in instance_type:
+                raise RuntimeError(
+                    f"{instance_family.upper()}-family instances are no longer supported in our system."
+                    f"Please use a different instance type (i.e. another {instance_serie.upper()} series instance type)."
+                )
+    return
+
+
+@pytest.fixture(scope="session")
+def use_large_storage(request):
+    if hasattr(request, "param"):
+        return request.param
+    else:
+        return False
+
+
+@pytest.fixture(scope="session")
+def ecs_num_neurons(request, ecs_instance_type):
+    # Set the num neurons based on instance_type
+    if ecs_instance_type in ["trn1.2xlarge", "inf2.xlarge"]:
+        return 1
+    elif ecs_instance_type == "trn1.32xlarge":
+        return 16
+
+    return None
 
 
 @pytest.mark.timeout(300)
 @pytest.fixture(scope="function")
-def ecs_container_instance(request, ecs_cluster, ec2_client, ecs_client, ecs_instance_type, ecs_ami, region, ei_accelerator_type):
+def ecs_container_instance(
+    request,
+    ecs_cluster,
+    ec2_client,
+    ecs_client,
+    ecs_instance_type,
+    ecs_ami,
+    region,
+    use_large_storage,
+):
     """
     Fixture to handle spin up and tear down of ECS container instance
 
@@ -106,32 +150,43 @@ def ecs_container_instance(request, ecs_cluster, ec2_client, ecs_client, ecs_ins
         "UserData": user_data,
         "IamInstanceProfile": {"Name": "ecsInstanceRole"},
         "TagSpecifications": [
-            {"ResourceType": "instance", "Tags": [{"Key": "Name", "Value": f"CI-CD ecs worker {cluster_name}"}]},
+            {
+                "ResourceType": "instance",
+                "Tags": [{"Key": "Name", "Value": f"CI-CD ecs worker {cluster_name}"}],
+            },
         ],
         "MaxCount": 1,
         "MinCount": 1,
     }
-    if ei_accelerator_type:
-        params["ElasticInferenceAccelerators"] = [
-            {
-                'Type': ei_accelerator_type,
-                'Count': 1
-            }
+    if use_large_storage:
+        params["BlockDeviceMappings"] = [
+            {"DeviceName": "/dev/xvda", "Ebs": {"VolumeSize": 90, "VolumeType": "gp2"}}
         ]
-        availability_zones = {"us-west-2": ["us-west-2a", "us-west-2b", "us-west-2c"],
-                              "us-east-1": ["us-east-1a", "us-east-1b", "us-east-1c"]}
-        for a_zone in availability_zones[region]:
-            params["Placement"] = {
-                'AvailabilityZone': a_zone
+
+    reservations = ec2_utils.get_available_reservations(
+        ec2_client=ec2_client, instance_type=instance_type, min_availability=params["MinCount"]
+    )
+    fn_name = request.node.name
+    instances = None
+    while reservations:
+        reservation = reservations.pop(0)
+        params["CapacityReservationSpecification"] = {
+            "CapacityReservationTarget": {
+                "CapacityReservationId": reservation["CapacityReservationId"]
             }
-            try:
-                instances = ec2_client.run_instances(**params)
-                if instances:
-                    break
-            except ClientError as e:
-                print(f"Failed to launch in {a_zone} with Error: {e}")
-                continue
-    else:
+        }
+        try:
+            instances = ec2_client.run_instances(**params)
+            test_utils.LOGGER.info(
+                f"Your reservation is ready for {fn_name}, please wait to be seated. Launching..."
+            )
+            if test_utils.is_mainline_context():
+                test_utils.LOGGER.info(f"Launched instance for {fn_name} via {reservation}")
+        except ClientError as e:
+            test_utils.LOGGER.error(f"Failed to launch via reservation for {fn_name} - {e}")
+
+    if not instances:
+        params.pop("CapacityReservationSpecification", None)
         instances = ec2_client.run_instances(**params)
     instance_id = instances.get("Instances")[0].get("InstanceId")
 

@@ -8,8 +8,6 @@ pip_packages:
   - autogluon.features
   - autogluon.mxnet
   - autogluon.tabular
-  - autogluon.text
-  - autogluon.vision
   - awscli
   - awsio
   - boto3
@@ -100,6 +98,7 @@ pip_packages:
   - mkl
   - mkl-include
   - pybind11
+  - smart-sifting
 apt_packages:
   - cuda-command-line-tools
   - cuda-cufft

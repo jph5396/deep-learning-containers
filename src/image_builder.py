@@ -17,25 +17,38 @@ import concurrent.futures
 import datetime
 import os
 import re
+import tempfile
 
 from copy import deepcopy
 
 import constants
 import utils
-import boto3
 import itertools
+import patch_helper
 
 from codebuild_environment import get_codebuild_project_name, get_cloned_folder_path
-from config import parse_dlc_developer_configs, is_build_enabled
+from config import is_build_enabled, is_autopatch_build_enabled
 from context import Context
 from metrics import Metrics
 from image import DockerImage
 from common_stage_image import CommonStageImage
 from buildspec import Buildspec
 from output import OutputFormatter
+from utils import get_dummy_boto_client
+
 
 FORMATTER = OutputFormatter(constants.PADDING)
 build_context = os.getenv("BUILD_CONTEXT")
+
+
+def is_nightly_build_context():
+    """
+    Returns True if image builder is running in a nightly context or nightly PR test mode. Otherwise returns False
+    :return: <bool> True or False
+    """
+    return (
+        build_context == "NIGHTLY" or os.getenv("NIGHTLY_PR_TEST_MODE", "false").lower() == "true"
+    )
 
 
 def _find_image_object(images_list, image_name):
@@ -54,25 +67,57 @@ def _find_image_object(images_list, image_name):
 
 
 # TODO: Abstract away to ImageBuilder class
-def image_builder(buildspec):
-
+def image_builder(buildspec, image_types=[], device_types=[]):
+    """
+    Builds images using build specification with specified image and device types
+    and export them to ECR image repository
+    An empty image types array indicates all image types.
+    Similarly, an empty device types array indicates all device types
+    :param buildspec: buid specification defining images to be build
+    :param image_types: <list> list of image types
+    :param device_types: <list> list of image device type
+    """
     BUILDSPEC = Buildspec()
     BUILDSPEC.load(buildspec)
     PRE_PUSH_STAGE_IMAGES = []
     COMMON_STAGE_IMAGES = []
 
-    if "huggingface" in str(BUILDSPEC["framework"]) or "autogluon" in str(BUILDSPEC["framework"]) or "trcomp" in str(BUILDSPEC["framework"]):
+    if (
+        "huggingface" in str(BUILDSPEC["framework"])
+        or "autogluon" in str(BUILDSPEC["framework"])
+        or "stabilityai" in str(BUILDSPEC["framework"])
+        or "trcomp" in str(BUILDSPEC["framework"])
+        or is_autopatch_build_enabled(buildspec_path=buildspec)
+    ):
         os.system("echo login into public ECR")
         os.system(
             "aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin 763104351884.dkr.ecr.us-west-2.amazonaws.com"
         )
 
     for image_name, image_config in BUILDSPEC["images"].items():
+        # filter by image type if type is specified
+        if image_types and not image_config["image_type"] in image_types:
+            continue
+
+        # filter by device type if type is specified
+        if device_types and not image_config["device_type"] in device_types:
+            continue
+
         ARTIFACTS = deepcopy(BUILDSPEC["context"]) if BUILDSPEC.get("context") else {}
 
         extra_build_args = {}
         labels = {}
-        enable_datetime_tag = parse_dlc_developer_configs("build", "datetime_tag")
+
+        prod_repo_uri = ""
+        if is_autopatch_build_enabled(buildspec_path=buildspec):
+            prod_repo_uri = utils.derive_prod_image_uri_using_image_config_from_buildspec(
+                image_config=image_config,
+                framework=BUILDSPEC["framework"],
+                new_account_id=constants.PUBLIC_DLC_REGISTRY,
+            )
+            FORMATTER.print(
+                f"""[PROD_URI for {image_config["repository"]}:{image_config["tag"]}] {prod_repo_uri}"""
+            )
 
         if image_config.get("version") is not None:
             if BUILDSPEC["version"] != image_config.get("version"):
@@ -80,10 +125,30 @@ def image_builder(buildspec):
 
         if image_config.get("context") is not None:
             ARTIFACTS.update(image_config["context"])
+        image_tag = (
+            tag_image_with_pr_number(image_config["tag"])
+            if build_context == "PR"
+            else image_config["tag"]
+        )
 
-        image_tag = tag_image_with_pr_number(image_config["tag"]) if build_context == "PR" else image_config["tag"]
-        if enable_datetime_tag or build_context != "PR":
+        if is_autopatch_build_enabled(buildspec_path=buildspec):
+            image_tag = append_tag(image_tag, "autopatch")
+
+        additional_image_tags = []
+        if is_nightly_build_context():
+            additional_image_tags.append(tag_image_with_date(image_tag))
+
+        if is_build_enabled() or build_context != "PR":
+            # Order appears to matter in datetime tagging, so tag with no datetime first, then
+            # set image_tag to have datetime
+            no_datetime = image_tag
+            additional_image_tags.append(no_datetime)
+            if build_context == "MAINLINE":
+                additional_image_tags.append(tag_image_with_initiator(no_datetime))
             image_tag = tag_image_with_datetime(image_tag)
+
+        additional_image_tags.append(image_tag)
+
         image_repo_uri = (
             image_config["repository"]
             if build_context == "PR"
@@ -91,7 +156,9 @@ def image_builder(buildspec):
         )
         base_image_uri = None
         if image_config.get("base_image_name") is not None:
-            base_image_object = _find_image_object(PRE_PUSH_STAGE_IMAGES, image_config["base_image_name"])
+            base_image_object = _find_image_object(
+                PRE_PUSH_STAGE_IMAGES, image_config["base_image_name"]
+            )
             base_image_uri = base_image_object.ecr_url
 
         if image_config.get("download_artifacts") is not None:
@@ -120,46 +187,83 @@ def image_builder(buildspec):
 
         transformers_version = image_config.get("transformers_version")
 
-        if str(BUILDSPEC["framework"]).startswith("huggingface") or str(BUILDSPEC["framework"]).endswith("trcomp"):
+        if str(BUILDSPEC["framework"]).startswith("huggingface"):
             if transformers_version:
                 extra_build_args["TRANSFORMERS_VERSION"] = transformers_version
             else:
-                raise KeyError(f"HuggingFace buildspec.yml must contain 'transformers_version' field for each image")
+                raise KeyError(
+                    f"HuggingFace buildspec.yml must contain 'transformers_version' field for each image"
+                )
             if "datasets_version" in image_config:
                 extra_build_args["DATASETS_VERSION"] = image_config.get("datasets_version")
             elif str(image_config["image_type"]) == "training":
-                raise KeyError(f"HuggingFace buildspec.yml must contain 'datasets_version' field for each image")
+                raise KeyError(
+                    f"HuggingFace buildspec.yml must contain 'datasets_version' field for each image"
+                )
+
+        torchserve_version = image_config.get("torch_serve_version")
+        inference_toolkit_version = image_config.get("tool_kit_version")
+        if torchserve_version:
+            extra_build_args["TORCHSERVE_VERSION"] = torchserve_version
+        if inference_toolkit_version:
+            extra_build_args["SM_TOOLKIT_VERSION"] = inference_toolkit_version
+
+        tag_override = image_config.get("build_tag_override")
+        dockerfile = image_config["docker_file"]
+        target = image_config.get("target")
+        tag_override_regex = r"^(beta|pr):\S+$"
+        if tag_override and build_context == "PR":
+            if is_autopatch_build_enabled(buildspec_path=buildspec):
+                FORMATTER.print("AUTOPATCH ENABLED IN BUILDSPEC, CANNOT OVERRIDE WITH TAG, SORRY!")
+            elif not re.match(tag_override_regex, tag_override):
+                FORMATTER.print(
+                    f"TAG OVERRIDE MUST BE OF FORMAT {tag_override_regex}, but got {tag_override}. Proceeding with regular build."
+                )
+            else:
+                repo_override, t_override = tag_override.split(":")
+                with tempfile.NamedTemporaryFile(mode="w", delete=False) as temp_file_handle:
+                    source_uri = (
+                        f"{image_repo_uri.replace('pr-', f'{repo_override}-')}:{t_override}"
+                    )
+                    temp_file_handle.write(
+                        f"FROM {source_uri}\nLABEL dlc.dev.source_img={source_uri}"
+                    )
+                    dockerfile = temp_file_handle.name
+                    target = None
+                FORMATTER.print(f"USING TAG OVERRIDE {source_uri}")
 
         ARTIFACTS.update(
             {
                 "dockerfile": {
-                    "source": image_config["docker_file"],
+                    "source": dockerfile,
                     "target": "Dockerfile",
                 }
             }
         )
-
         context = Context(ARTIFACTS, f"build/{image_name}.tar.gz", image_config["root"])
 
         if "labels" in image_config:
             labels.update(image_config.get("labels"))
+            for label, value in labels.items():
+                if isinstance(value, bool):
+                    labels[label] = str(value)
 
         cx_type = utils.get_label_prefix_customer_type(image_tag)
 
         # Define label variables
-        label_framework = str(BUILDSPEC['framework']).replace('_', '-')
+        label_framework = str(BUILDSPEC["framework"]).replace("_", "-")
         if image_config.get("framework_version"):
-            label_framework_version = str(image_config['framework_version']).replace('.', '-')
+            label_framework_version = str(image_config["framework_version"]).replace(".", "-")
         else:
-            label_framework_version = str(BUILDSPEC['version']).replace('.', '-')
-        label_device_type = str(image_config['device_type'])
+            label_framework_version = str(BUILDSPEC["version"]).replace(".", "-")
+        label_device_type = str(image_config["device_type"])
         if label_device_type == "gpu":
             label_device_type = f"{label_device_type}.{str(image_config['cuda_version'])}"
-        label_arch = str(BUILDSPEC['arch_type'])
-        label_python_version = str(image_config['tag_python_version'])
-        label_os_version = str(image_config.get('os_version')).replace('.', '-')
-        label_contributor = str(BUILDSPEC.get('contributor'))
-        label_transformers_version = str(transformers_version).replace('.', '-')
+        label_arch = str(BUILDSPEC["arch_type"])
+        label_python_version = str(image_config["tag_python_version"])
+        label_os_version = str(image_config.get("os_version")).replace(".", "-")
+        label_contributor = str(BUILDSPEC.get("contributor"))
+        label_transformers_version = str(transformers_version).replace(".", "-")
 
         # job_type will be either inference or training, based on the repo URI
         if "training" in image_repo_uri:
@@ -177,23 +281,25 @@ def image_builder(buildspec):
             labels[
                 f"com.amazonaws.ml.engines.{cx_type}.dlc.framework.{label_framework}.{label_framework_version}"
             ] = "true"
-            labels[
-                f"com.amazonaws.ml.engines.{cx_type}.dlc.device.{label_device_type}"
-            ] = "true"
+            labels[f"com.amazonaws.ml.engines.{cx_type}.dlc.device.{label_device_type}"] = "true"
             labels[f"com.amazonaws.ml.engines.{cx_type}.dlc.arch.{label_arch}"] = "true"
             # python version label will look like py_version.py36, for example
-            labels[
-                f"com.amazonaws.ml.engines.{cx_type}.dlc.python.{label_python_version}"
-            ] = "true"
+            labels[f"com.amazonaws.ml.engines.{cx_type}.dlc.python.{label_python_version}"] = "true"
             labels[f"com.amazonaws.ml.engines.{cx_type}.dlc.os.{label_os_version}"] = "true"
 
             labels[f"com.amazonaws.ml.engines.{cx_type}.dlc.job.{label_job_type}"] = "true"
 
             if label_contributor:
-                labels[f"com.amazonaws.ml.engines.{cx_type}.dlc.contributor.{label_contributor}"] = "true"
+                labels[
+                    f"com.amazonaws.ml.engines.{cx_type}.dlc.contributor.{label_contributor}"
+                ] = "true"
             if transformers_version:
                 labels[
                     f"com.amazonaws.ml.engines.{cx_type}.dlc.lib.transformers.{label_transformers_version}"
+                ] = "true"
+            if torchserve_version and inference_toolkit_version:
+                labels[
+                    f"com.amazonaws.ml.engines.{cx_type}.dlc.inference-toolkit.{inference_toolkit_version}.torchserve.{torchserve_version}"
                 ] = "true"
 
         """
@@ -215,30 +321,41 @@ def image_builder(buildspec):
             "enable_test_promotion": image_config.get("enable_test_promotion", True),
             "labels": labels,
             "extra_build_args": extra_build_args,
+            "cx_type": cx_type,
+            "release_image_uri": prod_repo_uri,
+            "buildspec_path": buildspec,
         }
 
         # Create pre_push stage docker object
         pre_push_stage_image_object = DockerImage(
             info=info,
-            dockerfile=image_config["docker_file"],
+            dockerfile=dockerfile,
             repository=image_repo_uri,
             tag=append_tag(image_tag, "pre-push"),
             to_build=image_config["build"],
             stage=constants.PRE_PUSH_STAGE,
             context=context,
-            additional_tags=[image_tag],
-            target=image_config.get("target"),
+            additional_tags=additional_image_tags,
+            target=target,
         )
 
         ##### Create Common stage docker object #####
         # If for a pre_push stage image we create a common stage image, then we do not push the pre_push stage image
         # to the repository. Instead, we just push its common stage image to the repository. Therefore,
         # inside function get_common_stage_image_object we make pre_push_stage_image_object non pushable.
-        common_stage_image_object = generate_common_stage_image_object(pre_push_stage_image_object, image_tag)
+        common_stage_image_object = generate_common_stage_image_object(
+            pre_push_stage_image_object, image_tag
+        )
         COMMON_STAGE_IMAGES.append(common_stage_image_object)
 
         PRE_PUSH_STAGE_IMAGES.append(pre_push_stage_image_object)
         FORMATTER.separator()
+
+    if is_autopatch_build_enabled(buildspec_path=buildspec) and is_build_enabled():
+        FORMATTER.banner("APATCH-PREP")
+        patch_helper.initiate_multithreaded_autopatch_prep(
+            PRE_PUSH_STAGE_IMAGES, make_dummy_boto_client=True
+        )
 
     FORMATTER.banner("DLC")
 
@@ -250,10 +367,12 @@ def image_builder(buildspec):
     IMAGES_TO_PUSH = [image for image in ALL_IMAGES if image.to_push and image.to_build]
 
     pushed_images = []
-    pushed_images += process_images(parent_images, "Parent/Independent")
-    pushed_images += process_images(child_images, "Child/Dependent")
+    pushed_images += process_images(parent_images, "Parent/Independent", buildspec_path=buildspec)
+    pushed_images += process_images(child_images, "Child/Dependent", buildspec_path=buildspec)
 
-    assert all(image in pushed_images for image in IMAGES_TO_PUSH), "Few images could not be pushed."
+    assert all(
+        image in pushed_images for image in IMAGES_TO_PUSH
+    ), "Few images could not be pushed."
 
     # After the build, display logs/summary for all the images.
     FORMATTER.banner("Summary")
@@ -265,28 +384,29 @@ def image_builder(buildspec):
     # From all images, filter the images that were supposed to be built and upload their metrics
     BUILT_IMAGES = [image for image in ALL_IMAGES if image.to_build]
 
-    FORMATTER.banner("Upload Metrics")
-    upload_metrics(BUILT_IMAGES, BUILDSPEC, is_any_build_failed, is_any_build_failed_size_limit)
+    if BUILT_IMAGES:
+        FORMATTER.banner("Upload Metrics")
+        upload_metrics(BUILT_IMAGES, BUILDSPEC, is_any_build_failed, is_any_build_failed_size_limit)
 
-    FORMATTER.banner("Test Env")
     # Set environment variables to be consumed by test jobs
     test_trigger_job = get_codebuild_project_name()
     # Tests should only run on images that were pushed to the repository
+    images_to_test = IMAGES_TO_PUSH
     if not is_build_enabled():
         # Ensure we have images populated if do_build is false, so that tests can proceed if needed
         images_to_test = [image for image in ALL_IMAGES if image.to_push]
-    else:
-        images_to_test = IMAGES_TO_PUSH
 
-    utils.set_test_env(
-        images_to_test,
-        use_latest_additional_tag=True,
-        BUILD_CONTEXT=os.getenv("BUILD_CONTEXT"),
-        TEST_TRIGGER=test_trigger_job,
-    )
+    if images_to_test:
+        FORMATTER.banner("Test Env")
+        utils.set_test_env(
+            images_to_test,
+            use_latest_additional_tag=True,
+            BUILD_CONTEXT=os.getenv("BUILD_CONTEXT"),
+            TEST_TRIGGER=test_trigger_job,
+        )
 
 
-def process_images(pre_push_image_list, pre_push_image_type="Pre-push"):
+def process_images(pre_push_image_list, pre_push_image_type="Pre-push", buildspec_path=""):
     """
     Handles all the tasks related to a particular type of Pre Push images. It takes in the list of
     pre push images and then builds it. After the pre-push images have been built, it extracts the
@@ -316,6 +436,11 @@ def process_images(pre_push_image_list, pre_push_image_type="Pre-push"):
     FORMATTER.banner(f"{pre_push_image_type} Push Images")
     all_images = pre_push_image_list + common_stage_image_list
     images_to_push = [image for image in all_images if image.to_push and image.to_build]
+
+    if is_autopatch_build_enabled(buildspec_path=buildspec_path):
+        for image in images_to_push:
+            patch_helper.retrive_autopatched_image_history_and_upload_to_s3(image_uri=image.ecr_url)
+
     push_images(images_to_push)
 
     FORMATTER.banner(f"{pre_push_image_type} Retagging")
@@ -333,15 +458,19 @@ def generate_common_stage_image_object(pre_push_stage_image_object, image_tag):
     :return: CommonStageImage, an object of class CommonStageImage. CommonStageImage inherits DockerImage.
     """
     common_stage_info = deepcopy(pre_push_stage_image_object.info)
-    common_stage_info["extra_build_args"].update({"PRE_PUSH_IMAGE": pre_push_stage_image_object.ecr_url})
+    common_stage_info["extra_build_args"].update(
+        {"PRE_PUSH_IMAGE": pre_push_stage_image_object.ecr_url}
+    )
     common_stage_image_object = CommonStageImage(
         info=common_stage_info,
-        dockerfile=os.path.join(os.sep, get_cloned_folder_path(), "miscellaneous_dockerfiles", "Dockerfile.common"),
+        dockerfile=os.path.join(
+            os.sep, get_cloned_folder_path(), "miscellaneous_dockerfiles", "Dockerfile.common"
+        ),
         repository=pre_push_stage_image_object.repository,
         tag=append_tag(image_tag, "multistage-common"),
         to_build=pre_push_stage_image_object.to_build,
         stage=constants.COMMON_STAGE,
-        additional_tags=[image_tag],
+        additional_tags=pre_push_stage_image_object.additional_tags,
     )
     pre_push_stage_image_object.to_push = False
     pre_push_stage_image_object.corresponding_common_stage_image = common_stage_image_object
@@ -411,7 +540,9 @@ def upload_metrics(images, BUILDSPEC, is_any_build_failed, is_any_build_failed_s
     :param is_any_build_failed_size_limit: bool
     """
     metrics = Metrics(
-        context=constants.BUILD_CONTEXT, region=BUILDSPEC["region"], namespace=constants.METRICS_NAMESPACE
+        context=constants.BUILD_CONTEXT,
+        region=BUILDSPEC["region"],
+        namespace=constants.METRICS_NAMESPACE,
     )
     for image in images:
         try:
@@ -450,18 +581,6 @@ def build_images(images, make_dummy_boto_client=False):
     FORMATTER.progress(THREADS)
 
 
-#### TODO: Remove this entire method when https://github.com/boto/boto3/issues/1592 is resolved ####
-def get_dummy_boto_client():
-    """
-    Makes a dummy boto3 client to ensure that boto3 clients behave in a thread safe manner.
-    In absence of this method, the behaviour documented in https://github.com/boto/boto3/issues/1592 is observed.
-    Once https://github.com/boto/boto3/issues/1592 is resolved, this method can be removed.
-
-    :return: BotocoreClientSTS
-    """
-    return boto3.client("sts", region_name=os.getenv("REGION"))
-
-
 def push_images(images):
     """
     Takes a list of images and PUSHES them to ECR concurrently.
@@ -469,7 +588,9 @@ def push_images(images):
     :param images: list[DockerImage]
     """
     THREADS = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=constants.MAX_WORKER_COUNT_FOR_PUSHING_IMAGES) as executor:
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=constants.MAX_WORKER_COUNT_FOR_PUSHING_IMAGES
+    ) as executor:
         for image in images:
             THREADS[image.name] = executor.submit(image.push_image)
     FORMATTER.progress(THREADS)
@@ -482,7 +603,9 @@ def retag_and_push_images(images):
     :param images: list[DockerImage]
     """
     THREADS = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=constants.MAX_WORKER_COUNT_FOR_PUSHING_IMAGES) as executor:
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=constants.MAX_WORKER_COUNT_FOR_PUSHING_IMAGES
+    ) as executor:
         for image in images:
             THREADS[image.name] = executor.submit(image.push_image_with_additional_tags)
     FORMATTER.progress(THREADS)
@@ -493,9 +616,21 @@ def tag_image_with_pr_number(image_tag):
     return f"{image_tag}-pr-{pr_number}"
 
 
+def tag_image_with_date(image_tag):
+    date_suffix = datetime.datetime.now().strftime("%Y-%m-%d")
+    return f"{image_tag}-{date_suffix}"
+
+
 def tag_image_with_datetime(image_tag):
     datetime_suffix = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     return f"{image_tag}-{datetime_suffix}"
+
+
+def tag_image_with_initiator(image_tag):
+    """
+    Add additional debug tags
+    """
+    return f"{image_tag}-{os.getenv('CODEBUILD_INITIATOR', '').split('/')[-1]}-{os.getenv('CODEBUILD_RESOLVED_SOURCE_VERSION', '')[:7]}"
 
 
 def append_tag(image_tag, append_str):
@@ -512,7 +647,16 @@ def modify_repository_name_for_context(image_repo_uri, build_context):
     repo_uri_values = image_repo_uri.split("/")
     repo_name = repo_uri_values[-1]
     if build_context == "MAINLINE":
-        repo_uri_values[-1] = repo_name.replace(constants.PR_REPO_PREFIX, constants.MAINLINE_REPO_PREFIX)
+        if is_autopatch_build_enabled():
+            repo_uri_values[-1] = repo_name.replace(
+                constants.PR_REPO_PREFIX, constants.AUTOPATCH_REPO_PREFIX
+            )
+        else:
+            repo_uri_values[-1] = repo_name.replace(
+                constants.PR_REPO_PREFIX, constants.MAINLINE_REPO_PREFIX
+            )
     elif build_context == "NIGHTLY":
-        repo_uri_values[-1] = repo_name.replace(constants.PR_REPO_PREFIX, constants.NIGHTLY_REPO_PREFIX)
+        repo_uri_values[-1] = repo_name.replace(
+            constants.PR_REPO_PREFIX, constants.NIGHTLY_REPO_PREFIX
+        )
     return "/".join(repo_uri_values)

@@ -3,6 +3,7 @@ import json
 import time
 
 from packaging.version import Version
+from packaging.specifiers import SpecifierSet
 
 import pytest
 
@@ -20,19 +21,31 @@ from test.test_utils import (
 )
 
 
+@pytest.mark.usefixtures("feature_smdebug_present")
 @pytest.mark.usefixtures("sagemaker_only", "huggingface")
 @pytest.mark.integration("smprofiler")
+@pytest.mark.team("smdebug")
 @pytest.mark.model("N/A")
-@pytest.mark.skipif(not is_mainline_context() and not is_rc_test_context(), reason="Mainline only test")
+@pytest.mark.skipif(
+    not is_mainline_context() and not is_rc_test_context(), reason="Mainline only test"
+)
 def test_sm_profiler_pt(pytorch_training):
     processor = get_processor_from_image_uri(pytorch_training)
     if processor not in ("cpu", "gpu"):
         pytest.skip(f"Processor {processor} not supported. Skipping test.")
 
+    _, image_framework_version = get_framework_and_version_from_tag(pytorch_training)
+    if Version(image_framework_version) in SpecifierSet(">=2.0"):
+        pytest.skip("sm profiler is deprecated after Pytorch 2.0")
+    if Version(image_framework_version) in SpecifierSet(">=1.10"):
+        pytest.skip("sm profiler ZCC test is not supported in PT 1.10 and above")
+
     ctx = Context()
 
     profiler_tests_dir = os.path.join(
-        os.getenv("CODEBUILD_SRC_DIR"), get_container_name("smprof", pytorch_training), "smprofiler_tests"
+        os.getenv("CODEBUILD_SRC_DIR"),
+        get_container_name("smprof", pytorch_training),
+        "smprofiler_tests",
     )
     ctx.run(f"mkdir -p {profiler_tests_dir}", hide=True)
 
@@ -52,29 +65,43 @@ def test_sm_profiler_pt(pytorch_training):
                 "aws s3 cp s3://smdebug-testing/datasets/cifar-10-python.tar.gz data/cifar-10-batches-py.tar.gz",
                 hide=True,
             )
-            ctx.run("aws s3 cp s3://smdebug-testing/datasets/MNIST_pytorch.tar.gz data/MNIST_pytorch.tar.gz", hide=True)
+            ctx.run(
+                "aws s3 cp s3://smdebug-testing/datasets/MNIST_pytorch.tar.gz data/MNIST_pytorch.tar.gz",
+                hide=True,
+            )
             with ctx.prefix("cd data"):
                 ctx.run("tar -zxf MNIST_pytorch.tar.gz", hide=True)
                 ctx.run("tar -zxf cifar-10-batches-py.tar.gz", hide=True)
 
-    run_sm_profiler_tests(pytorch_training, profiler_tests_dir, "test_profiler_pytorch.py", processor)
+    run_sm_profiler_tests(
+        pytorch_training, profiler_tests_dir, "test_profiler_pytorch.py", processor
+    )
 
 
+@pytest.mark.usefixtures("feature_smdebug_present")
 @pytest.mark.usefixtures("sagemaker_only", "huggingface")
 @pytest.mark.integration("smprofiler")
+@pytest.mark.team("smdebug")
 @pytest.mark.model("N/A")
-@pytest.mark.skipif(not is_mainline_context() and not is_rc_test_context(), reason="Mainline only test")
-def test_sm_profiler_tf(tensorflow_training):
+@pytest.mark.skipif(
+    not is_mainline_context() and not is_rc_test_context(), reason="Mainline only test"
+)
+def test_sm_profiler_tf(tensorflow_training, below_tf213_only):
     if is_tf_version("1", tensorflow_training):
         pytest.skip("Skipping test on TF1, since there are no smprofiler config files for TF1")
     processor = get_processor_from_image_uri(tensorflow_training)
     if processor not in ("cpu", "gpu"):
         pytest.skip(f"Processor {processor} not supported. Skipping test.")
+    _, image_framework_version = get_framework_and_version_from_tag(tensorflow_training)
+    if Version(image_framework_version) in SpecifierSet(">=2.11"):
+        pytest.skip("sm profiler is deprecated after TensorFlow 2.11")
 
     ctx = Context()
 
     profiler_tests_dir = os.path.join(
-        os.getenv("CODEBUILD_SRC_DIR"), get_container_name("smprof", tensorflow_training), "smprofiler_tests"
+        os.getenv("CODEBUILD_SRC_DIR"),
+        get_container_name("smprof", tensorflow_training),
+        "smprofiler_tests",
     )
     ctx.run(f"mkdir -p {profiler_tests_dir}", hide=True)
 
@@ -82,11 +109,13 @@ def test_sm_profiler_tf(tensorflow_training):
     sm_tests_zip = "sagemaker-tests.zip"
     ctx.run(
         f"aws s3 cp {os.getenv('SMPROFILER_TESTS_BUCKET')}/{sm_tests_zip} {profiler_tests_dir}/{sm_tests_zip}",
-        hide=True
+        hide=True,
     )
     ctx.run(f"cd {profiler_tests_dir} && unzip {sm_tests_zip}", hide=True)
 
-    run_sm_profiler_tests(tensorflow_training, profiler_tests_dir, "test_profiler_tensorflow.py", processor)
+    run_sm_profiler_tests(
+        tensorflow_training, profiler_tests_dir, "test_profiler_tensorflow.py", processor
+    )
 
 
 class SMProfilerRCTestFailure(Exception):
@@ -129,13 +158,15 @@ def run_sm_profiler_tests(image, profiler_tests_dir, test_file, processor):
         "enable_smdataparallel_tests": enable_sm_data_parallel_tests,
         "force_run_tests": "false",
         "framework": framework,
-        "build_type": "release"
+        "build_type": "release",
     }
 
     # Command to set all necessary environment variables
     export_cmd = " && ".join(f"export {key}={val}" for key, val in smprof_configs.items())
-    export_cmd = f"{export_cmd} && export ENV_CPU_TRAIN_IMAGE=test && export ENV_GPU_TRAIN_IMAGE=test && " \
-                 f"export ENV_{processor.upper()}_TRAIN_IMAGE={image}"
+    export_cmd = (
+        f"{export_cmd} && export ENV_CPU_TRAIN_IMAGE=test && export ENV_GPU_TRAIN_IMAGE=test && "
+        f"export ENV_{processor.upper()}_TRAIN_IMAGE={image}"
+    )
 
     test_results_outfile = os.path.join(os.getcwd(), f"{get_container_name('smprof', image)}.txt")
     with ctx.prefix(f"cd {profiler_tests_dir}"):
@@ -148,7 +179,9 @@ def run_sm_profiler_tests(image, profiler_tests_dir, test_file, processor):
                 )
                 with open(test_results_outfile) as outfile:
                     result_data = json.load(outfile)
-                    LOGGER.info(f"Tests passed on {image}; Results:\n{json.dumps(result_data, indent=4)}")
+                    LOGGER.info(
+                        f"Tests passed on {image}; Results:\n{json.dumps(result_data, indent=4)}"
+                    )
             except Exception as e:
                 if os.path.exists(test_results_outfile):
                     with open(test_results_outfile) as outfile:

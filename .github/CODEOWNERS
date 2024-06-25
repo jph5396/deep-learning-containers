@@ -7,28 +7,19 @@
 # review when someone opens a pull request.
 *       @aws/dl-containers
 
-# Any modification to sagemaker_tests will require review from SageMaker MLF team
-sagemaker_tests/ @aws/sagemaker-ml-frameworks
 
+# Common files that is managed by multiple owners
+available_images.md @aws/dl-containers @aws/dlc-autogluon-reviewers @aws/dlc-neuron-reviewers @aws/dlc-eia-reviewers @aws/dlc-trcomp-reviewers @aws/dlc-lmi-reviewers @aws/sagemaker-1p-algorithms @aws/dlc-pytorch-reviewers @aws/dlc-triton-reviewers
+release_images_inference.yml @aws/dl-containers @aws/dlc-autogluon-reviewers @aws/dlc-neuron-reviewers @aws/dlc-eia-reviewers @aws/dlc-trcomp-reviewers @aws/dlc-lmi-reviewers @aws/sagemaker-1p-algorithms @aws/dlc-pytorch-reviewers @aws/dlc-triton-reviewers
+release_images_training.yml @aws/dl-containers @aws/dlc-autogluon-reviewers @aws/dlc-neuron-reviewers @aws/dlc-eia-reviewers @aws/dlc-trcomp-reviewers @aws/sagemaker-1p-algorithms @aws/dlc-pytorch-reviewers
+.release_images_template.yml @aws/dl-containers @aws/dlc-autogluon-reviewers @aws/dlc-neuron-reviewers @aws/dlc-eia-reviewers @aws/dlc-trcomp-reviewers @aws/dlc-pytorch-reviewers @aws/dlc-triton-reviewers
+data/ignore_ids_safety_scan.json @aws/dl-containers @aws/sagemaker-1p-algorithms
 # Any files modified under autogluon/ will be assigned to the autogluon reviewer team
 autogluon/ @aws/dlc-autogluon-reviewers
+test/sagemaker_tests/autogluon @aws/dlc-autogluon-reviewers
 
-# Any files modified under tensorflow/ or tensorflow_serving/ will be assigned to the tf reviewer team
-tensorflow/ @aws/dlc-tf-reviewers
-tensorflow_serving/ @aws/dlc-tf-reviewers
-
-# Any PR with testTF* or testTensor* file change will be assigned to the tf reviewer team
-testTF* @aws/dlc-tf-reviewers
-testTensor* @aws/dlc-tf-reviewers
-huggingface_tensorflow/ @aws/dlc-tf-reviewers
-
-# Any files modified under pytorch/ or pytorch_tests/ dir will require review from pytorch reviewer team
-pytorch/ @aws/dlc-pytorch-reviewers
-pytorch_tests/ @aws/dlc-pytorch-reviewers
-huggingface_pytorch/ @aws/dlc-pytorch-reviewers
-
-# Any files modified under mxnet/ dir will require review from the mxnet reviewer team
-mxnet/ @aws/dlc-mxnet-reviewers
+# Any PR with a file with "pytorch" in it will be assigned to the conda reviewer team
+*pytorch* @aws/dlc-pytorch-reviewers
 
 # Any PR with a file with "smdebug" in it will be assigned to the smdebug reviewer team
 *smdebug* @aws/dlc-smdebug-reviewers
@@ -45,3 +36,24 @@ dgl_tests/ @aws/dlc-dgl-reviewers
 
 # Any PR with a file with "trcomp" in it will be assigned to the SM Training Compiler team
 *trcomp* @aws/dlc-trcomp-reviewers
+
+# Any PR with a file with "inductor" in it will be assigned to the SM Training Compiler team
+*inductor* @aws/dlc-trcomp-reviewers
+
+# Any PR with a file with "smdataparallel" in it will be assigned to the SM DataParallel team
+*smdataparallel* @aws/dlc-sm-data-parallel-reviewers
+
+# Any PR with a file with "smmodelparallel" in it will be assigned to the SM ModelParallel team
+*smmodelparallel* @aws/dlc-sm-model-parallel-reviewers
+
+# Any PR with a file with "triton" in it will be assigned to the SM Triton/ModelServing team
+*triton* @aws/dlc-triton-reviewers
+
+# Files under stabilityai/ and huggingface/ directories can be directly reviewed by below teams
+stabilityai/ @aws/sagemaker-1p-algorithms
+huggingface/ @aws/sagemaker-1p-algorithms
+test/sagemaker_tests/huggingface/ @aws/sagemaker-1p-algorithms
+test/sagemaker_tests/huggingface_pytorch/ @aws/sagemaker-1p-algorithms
+test/sagemaker_tests/huggingface_tensorflow/ @aws/sagemaker-1p-algorithms
+test/sagemaker_tests/pytorch/inference/integration/sagemaker/test_stabilityai.py @aws/sagemaker-1p-algorithms
+test/sagemaker_tests/pytorch/inference/resources/stabilityai/ @aws/sagemaker-1p-algorithms

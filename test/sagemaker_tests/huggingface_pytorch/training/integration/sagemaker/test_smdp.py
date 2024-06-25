@@ -19,7 +19,11 @@ import sagemaker.huggingface
 from sagemaker.huggingface import HuggingFace
 
 from ..... import invoke_sm_helper_function
-from test.test_utils import get_framework_and_version_from_tag, get_cuda_version_from_tag
+from test.test_utils import (
+    get_framework_and_version_from_tag,
+    get_cuda_version_from_tag,
+    get_transformers_version_from_image_uri,
+)
 from packaging.version import Version
 from packaging.specifiers import SpecifierSet
 from ...integration import DEFAULT_TIMEOUT
@@ -28,31 +32,33 @@ import sagemaker
 import re
 
 # configuration for running training on smdistributed Data Parallel
-distribution = {'smdistributed': {'dataparallel': {'enabled': True}}}
+distribution = {"smdistributed": {"dataparallel": {"enabled": True}}}
 
 # hyperparameters, which are passed into the training job
 hyperparameters = {
-    'model_name_or_path': 'bert-large-uncased-whole-word-masking',
-    'dataset_name': 'squad',
-    'do_train': True,
-    'do_eval': True,
-    'fp16': True,
-    'per_device_train_batch_size': 4,
-    'per_device_eval_batch_size': 4,
-    'num_train_epochs': 1,
-    'max_seq_length': 384,
-    'max_steps': 10,
-    'pad_to_max_length': True,
-    'doc_stride': 128,
-    'output_dir': '/opt/ml/model'
+    "model_name_or_path": "hf-internal-testing/tiny-random-BertModel",
+    "dataset_name": "squad",
+    "do_train": True,
+    "do_eval": True,
+    "fp16": True,
+    "per_device_train_batch_size": 1,
+    "per_device_eval_batch_size": 1,
+    "num_train_epochs": 1,
+    "max_seq_length": 384,
+    "max_steps": 10,
+    "max_train_samples": 10,
+    "pad_to_max_length": True,
+    "doc_stride": 128,
+    "output_dir": "/opt/ml/model",
 }
 # metric definition to extract the results
 metric_definitions = [
     {"Name": "train_runtime", "Regex": "train_runtime.*=\D*(.*?)$"},
-    {'Name': 'train_samples_per_second', 'Regex': "train_samples_per_second.*=\D*(.*?)$"},
-    {'Name': 'epoch', 'Regex': "epoch.*=\D*(.*?)$"},
-    {'Name': 'f1', 'Regex': "f1.*=\D*(.*?)$"},
-    {'Name': 'exact_match', 'Regex': "exact_match.*=\D*(.*?)$"}]
+    {"Name": "train_samples_per_second", "Regex": "train_samples_per_second.*=\D*(.*?)$"},
+    {"Name": "epoch", "Regex": "epoch.*=\D*(.*?)$"},
+    {"Name": "f1", "Regex": "f1.*=\D*(.*?)$"},
+    {"Name": "exact_match", "Regex": "exact_match.*=\D*(.*?)$"},
+]
 
 
 def validate_or_skip_smdataparallel(ecr_image):
@@ -64,16 +70,8 @@ def can_run_smdataparallel(ecr_image):
     _, image_framework_version = get_framework_and_version_from_tag(ecr_image)
     image_cuda_version = get_cuda_version_from_tag(ecr_image)
     return Version(image_framework_version) in SpecifierSet(">=1.6") and Version(
-        image_cuda_version.strip("cu")) >= Version("110")
-
-
-def get_transformers_version(ecr_image):
-    transformers_version_search = re.search(r"transformers(\d+(\.\d+){1,2})", ecr_image)
-    if transformers_version_search:
-        transformers_version = transformers_version_search.group(1)
-        return transformers_version
-    else:
-        raise LookupError("HF transformers version not found in image URI")
+        image_cuda_version.strip("cu")
+    ) >= Version("110")
 
 
 @pytest.mark.integration("smdataparallel")
@@ -82,12 +80,14 @@ def get_transformers_version(ecr_image):
 @pytest.mark.skip_cpu
 @pytest.mark.skip_py2_containers
 @pytest.mark.skip_trcomp_containers
+@pytest.mark.team("sagemaker-1p-algorithms")
 def test_smdp_question_answering(ecr_image, sagemaker_regions, py_version):
     """
     Tests SM Distributed DataParallel single-node via script mode
     """
-    invoke_sm_helper_function(ecr_image, sagemaker_regions, _test_smdp_question_answering_function,
-                                 py_version, 1)
+    invoke_sm_helper_function(
+        ecr_image, sagemaker_regions, _test_smdp_question_answering_function, py_version, 1
+    )
 
 
 @pytest.mark.integration("smdataparallel")
@@ -97,17 +97,24 @@ def test_smdp_question_answering(ecr_image, sagemaker_regions, py_version):
 @pytest.mark.skip_cpu
 @pytest.mark.skip_py2_containers
 @pytest.mark.skip_trcomp_containers
+@pytest.mark.team("sagemaker-1p-algorithms")
 def test_smdp_question_answering_multinode(ecr_image, sagemaker_regions, py_version):
     """
     Tests SM Distributed DataParallel single-node via script mode
     """
-    invoke_sm_helper_function(ecr_image, sagemaker_regions, _test_smdp_question_answering_function,
-                                 py_version, 2)
+    invoke_sm_helper_function(
+        ecr_image, sagemaker_regions, _test_smdp_question_answering_function, py_version, 2
+    )
 
 
-def _test_smdp_question_answering_function(ecr_image, sagemaker_session, py_version, instances_quantity):
-    transformers_version = get_transformers_version(ecr_image)
-    git_config = {'repo': 'https://github.com/huggingface/transformers.git', 'branch': 'v' + transformers_version}
+def _test_smdp_question_answering_function(
+    ecr_image, sagemaker_session, py_version, instances_quantity
+):
+    transformers_version = get_transformers_version_from_image_uri(ecr_image)
+    git_config = {
+        "repo": "https://github.com/huggingface/transformers.git",
+        "branch": "v" + transformers_version,
+    }
 
     validate_or_skip_smdataparallel(ecr_image)
 
@@ -122,11 +129,11 @@ def _test_smdp_question_answering_function(ecr_image, sagemaker_session, py_vers
 
     with timeout(minutes=DEFAULT_TIMEOUT):
         estimator = HuggingFace(
-            entry_point='run_qa.py',
+            entry_point="run_qa.py",
             source_dir=source_dir,
             git_config=git_config,
             metric_definitions=metric_definitions,
-            role='SageMakerRole',
+            role="SageMakerRole",
             image_uri=ecr_image,
             instance_count=instance_count,
             instance_type=instance_type,
@@ -135,4 +142,4 @@ def _test_smdp_question_answering_function(ecr_image, sagemaker_session, py_vers
             distribution=distribution,
             hyperparameters=hyperparameters,
         )
-        estimator.fit(job_name=sagemaker.utils.unique_name_from_base('test-hf-pt-qa-smdp'))
+        estimator.fit(job_name=sagemaker.utils.unique_name_from_base("test-hf-pt-qa-smdp"))

@@ -21,7 +21,14 @@ RESOURCE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "r
 
 # EI is currently only supported in the following regions
 # regions were derived from https://aws.amazon.com/machine-learning/elastic-inference/pricing/
-EI_SUPPORTED_REGIONS = ["us-east-1", "us-east-2", "us-west-2", "eu-west-1", "ap-northeast-1", "ap-northeast-2"]
+EI_SUPPORTED_REGIONS = [
+    "us-east-1",
+    "us-east-2",
+    "us-west-2",
+    "eu-west-1",
+    "ap-northeast-1",
+    "ap-northeast-2",
+]
 
 # These regions have some p2 and p3 instances, but not enough for automated testing
 NO_P2_REGIONS = [
@@ -38,6 +45,7 @@ NO_P2_REGIONS = [
     "eu-south-1",
     "af-south-1",
     "ap-northeast-3",
+    "il-central-1",
 ]
 NO_P3_REGIONS = [
     "ap-northeast-1",
@@ -58,6 +66,7 @@ NO_P3_REGIONS = [
     "cn-northwest-1",
     "eu-south-1",
     "af-south-1",
+    "il-central-1",
 ]
 NO_P4_REGIONS = [
     "ap-northeast-3",
@@ -76,7 +85,9 @@ NO_P4_REGIONS = [
     "cn-northwest-1",
     "eu-south-1",
     "af-south-1",
+    "il-central-1",
 ]
+
 
 def _botocore_resolver():
     """

@@ -30,12 +30,12 @@ from sagemaker.pytorch import PyTorch
 from .utils import image_utils, get_ecr_registry
 
 logger = logging.getLogger(__name__)
-logging.getLogger('boto').setLevel(logging.INFO)
-logging.getLogger('boto3').setLevel(logging.INFO)
-logging.getLogger('botocore').setLevel(logging.INFO)
-logging.getLogger('factory.py').setLevel(logging.INFO)
-logging.getLogger('auth.py').setLevel(logging.INFO)
-logging.getLogger('connectionpool.py').setLevel(logging.INFO)
+logging.getLogger("boto").setLevel(logging.INFO)
+logging.getLogger("boto3").setLevel(logging.INFO)
+logging.getLogger("botocore").setLevel(logging.INFO)
+logging.getLogger("factory.py").setLevel(logging.INFO)
+logging.getLogger("auth.py").setLevel(logging.INFO)
+logging.getLogger("connectionpool.py").setLevel(logging.INFO)
 
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
@@ -55,6 +55,7 @@ NO_P2_REGIONS = [
     "sa-east-1",
     "us-west-1",
     "cn-northwest-1",
+    "il-central-1",
 ]
 NO_P3_REGIONS = [
     "af-south-1",
@@ -76,6 +77,7 @@ NO_P3_REGIONS = [
     "sa-east-1",
     "us-west-1",
     "cn-northwest-1",
+    "il-central-1",
 ]
 NO_P4_REGIONS = [
     "af-south-1",
@@ -94,29 +96,52 @@ NO_P4_REGIONS = [
     "sa-east-1",
     "us-west-1",
     "cn-northwest-1",
+    "il-central-1",
+]
+
+# TODO: Expand this list
+G5_AVAILABLE_REGIONS = [
+    "ca-central-1",
+    "us-west-2",
+    "us-east-1",
+    "us-east-2",
+    "eu-west-1",
 ]
 
 
 def pytest_addoption(parser):
-    parser.addoption('--build-image', '-D', action='store_true')
-    parser.addoption('--build-base-image', '-B', action='store_true')
-    parser.addoption('--aws-id')
-    parser.addoption('--instance-type')
-    parser.addoption('--accelerator-type', default=None)
-    parser.addoption('--docker-base-name', default='pytorch')
-    parser.addoption('--region', default='us-west-2')
-    parser.addoption('--framework-version', default='')
-    parser.addoption('--py-version', choices=['2', '3', '37', '38'], default=str(sys.version_info.major))
-    # Processor is still "cpu" for EIA tests
-    parser.addoption('--processor', choices=['gpu', 'cpu', 'eia', 'neuron'], default='cpu')
-    # If not specified, will default to {framework-version}-{processor}-py{py-version}
-    parser.addoption('--tag', default=None)
-    parser.addoption('--generate-coverage-doc', default=False, action='store_true',
-                     help='use this option to generate test coverage doc')
+    parser.addoption("--build-image", "-D", action="store_true")
+    parser.addoption("--build-base-image", "-B", action="store_true")
+    parser.addoption("--aws-id")
+    parser.addoption("--instance-type")
+    parser.addoption("--accelerator-type", default=None)
+    parser.addoption("--docker-base-name", default="pytorch")
+    parser.addoption("--region", default="us-west-2")
+    parser.addoption("--framework-version", default="")
     parser.addoption(
-        "--efa", action="store_true", default=False, help="Run only efa tests",
+        "--py-version",
+        choices=["2", "3", "37", "38", "39", "310", "311"],
+        default=str(sys.version_info.major),
     )
-    parser.addoption('--sagemaker-regions', default='us-west-2')
+    # Processor is still "cpu" for EIA tests
+    parser.addoption(
+        "--processor", choices=["gpu", "cpu", "eia", "neuron", "neuronx"], default="cpu"
+    )
+    # If not specified, will default to {framework-version}-{processor}-py{py-version}
+    parser.addoption("--tag", default=None)
+    parser.addoption(
+        "--generate-coverage-doc",
+        default=False,
+        action="store_true",
+        help="use this option to generate test coverage doc",
+    )
+    parser.addoption(
+        "--efa",
+        action="store_true",
+        default=False,
+        help="Run only efa tests",
+    )
+    parser.addoption("--sagemaker-regions", default="us-west-2")
 
 
 def pytest_configure(config):
@@ -131,176 +156,229 @@ def pytest_runtest_setup(item):
 
 
 def pytest_collection_modifyitems(session, config, items):
+    for item in items:
+        print(f"item {item}")
+        for marker in item.iter_markers(name="team"):
+            print(f"item {marker}")
+            team_name = marker.args[0]
+            item.user_properties.append(("team_marker", team_name))
+            print(f"item.user_properties {item.user_properties}")
+
     if config.getoption("--generate-coverage-doc"):
         from test.test_utils.test_reporting import TestReportGenerator
+
         report_generator = TestReportGenerator(items, is_sagemaker=True)
         report_generator.generate_coverage_doc(framework="pytorch", job_type="inference")
 
 
-@pytest.fixture(scope='session', name='docker_base_name')
+# Nightly fixtures
+@pytest.fixture(scope="session")
+def feature_aws_framework_present():
+    pass
+
+
+@pytest.fixture(scope="session", name="docker_base_name")
 def fixture_docker_base_name(request):
-    return request.config.getoption('--docker-base-name')
+    return request.config.getoption("--docker-base-name")
 
 
-@pytest.fixture(scope='session', name='region')
+@pytest.fixture(scope="session", name="region")
 def fixture_region(request):
-    return request.config.getoption('--region')
+    return request.config.getoption("--region")
 
 
-@pytest.fixture(scope='session', name='framework_version')
+@pytest.fixture(scope="session", name="framework_version")
 def fixture_framework_version(request):
-    return request.config.getoption('--framework-version')
+    return request.config.getoption("--framework-version")
 
-@pytest.fixture(scope='session', name='sagemaker_regions')
+
+@pytest.fixture(scope="session", name="sagemaker_regions")
 def fixture_sagemaker_region(request):
-    sagemaker_regions = request.config.getoption('--sagemaker-regions')
+    sagemaker_regions = request.config.getoption("--sagemaker-regions")
     return sagemaker_regions.split(",")
 
-@pytest.fixture(scope='session', name='py_version')
+
+@pytest.fixture(scope="session", name="py_version")
 def fixture_py_version(request):
-    return 'py{}'.format(int(request.config.getoption('--py-version')))
+    return "py{}".format(int(request.config.getoption("--py-version")))
 
 
-@pytest.fixture(scope='session', name='processor')
+@pytest.fixture(scope="session", name="processor")
 def fixture_processor(request):
-    return request.config.getoption('--processor')
+    return request.config.getoption("--processor")
 
 
-@pytest.fixture(scope='session', name='tag')
+@pytest.fixture(scope="session", name="tag")
 def fixture_tag(request, framework_version, processor, py_version):
-    provided_tag = request.config.getoption('--tag')
-    default_tag = '{}-{}-{}'.format(framework_version, processor, py_version)
+    provided_tag = request.config.getoption("--tag")
+    default_tag = "{}-{}-{}".format(framework_version, processor, py_version)
     return provided_tag if provided_tag else default_tag
 
 
-@pytest.fixture(scope='session', name='docker_image')
+@pytest.fixture(scope="session", name="docker_image")
 def fixture_docker_image(docker_base_name, tag):
-    return '{}:{}'.format(docker_base_name, tag)
+    return "{}:{}".format(docker_base_name, tag)
 
 
 @pytest.fixture
 def opt_ml():
     tmp = tempfile.mkdtemp()
-    os.mkdir(os.path.join(tmp, 'output'))
+    os.mkdir(os.path.join(tmp, "output"))
 
     # Docker cannot mount Mac OS /var folder properly see
     # https://forums.docker.com/t/var-folders-isnt-mounted-properly/9600
-    opt_ml_dir = '/private{}'.format(tmp) if platform.system() == 'Darwin' else tmp
+    opt_ml_dir = "/private{}".format(tmp) if platform.system() == "Darwin" else tmp
     yield opt_ml_dir
 
     shutil.rmtree(tmp, True)
 
 
-@pytest.fixture(scope='session', name='use_gpu')
+@pytest.fixture(scope="session", name="use_gpu")
 def fixture_use_gpu(processor):
-    return processor == 'gpu'
+    return processor == "gpu"
 
 
-@pytest.fixture(scope='session', name='build_base_image', autouse=True)
-def fixture_build_base_image(request, framework_version, py_version, processor, tag, docker_base_name):
-    build_base_image = request.config.getoption('--build-base-image')
+@pytest.fixture(scope="session", name="build_base_image", autouse=True)
+def fixture_build_base_image(
+    request, framework_version, py_version, processor, tag, docker_base_name
+):
+    build_base_image = request.config.getoption("--build-base-image")
     if build_base_image:
-        return image_utils.build_base_image(framework_name=docker_base_name,
-                                            framework_version=framework_version,
-                                            py_version=py_version,
-                                            base_image_tag=tag,
-                                            processor=processor,
-                                            cwd=os.path.join(dir_path, '..'))
+        return image_utils.build_base_image(
+            framework_name=docker_base_name,
+            framework_version=framework_version,
+            py_version=py_version,
+            base_image_tag=tag,
+            processor=processor,
+            cwd=os.path.join(dir_path, ".."),
+        )
 
     return tag
 
 
-@pytest.fixture(scope='session', name='sagemaker_session')
+@pytest.fixture(scope="session", name="sagemaker_session")
 def fixture_sagemaker_session(region):
     return Session(boto_session=boto3.Session(region_name=region))
 
 
-@pytest.fixture(scope='session', name='sagemaker_local_session')
+@pytest.fixture(scope="session", name="sagemaker_local_session")
 def fixture_sagemaker_local_session(region):
     return LocalSession(boto_session=boto3.Session(region_name=region))
 
 
-@pytest.fixture(name='aws_id', scope='session')
+@pytest.fixture(name="aws_id", scope="session")
 def fixture_aws_id(request):
-    return request.config.getoption('--aws-id')
+    return request.config.getoption("--aws-id")
 
 
-@pytest.fixture(name='instance_type', scope='session')
+@pytest.fixture(name="instance_type", scope="session")
 def fixture_instance_type(request, processor):
-    provided_instance_type = request.config.getoption('--instance-type')
-    default_instance_type = 'local' if processor == 'cpu' else 'local_gpu'
+    provided_instance_type = request.config.getoption("--instance-type")
+    default_instance_type = "local" if processor == "cpu" else "local_gpu"
     return provided_instance_type or default_instance_type
 
 
-@pytest.fixture(name='accelerator_type', scope='session')
+@pytest.fixture(name="accelerator_type", scope="session")
 def fixture_accelerator_type(request):
-    return request.config.getoption('--accelerator-type')
+    return request.config.getoption("--accelerator-type")
 
 
-@pytest.fixture(name='docker_registry', scope='session')
+@pytest.fixture(name="docker_registry", scope="session")
 def fixture_docker_registry(aws_id, region):
     return get_ecr_registry(aws_id, region)
 
 
-@pytest.fixture(name='ecr_image', scope='session')
+@pytest.fixture(name="ecr_image", scope="session")
 def fixture_ecr_image(docker_registry, docker_base_name, tag):
-    return '{}/{}:{}'.format(docker_registry, docker_base_name, tag)
+    return "{}/{}:{}".format(docker_registry, docker_base_name, tag)
+
+
+@pytest.fixture(autouse=True)
+def skip_based_on_image_and_marker_combination(request, ecr_image):
+    is_stabilityai_only_test = request.node.get_closest_marker("stabilityai_only") is not None
+    if is_stabilityai_only_test and "stabilityai" not in ecr_image:
+        pytest.skip(
+            f"Skipping because {ecr_image} is not StabilityAI image and the test is supposed to run for only stability images"
+        )
+
+    is_skip_stabilityai_test = request.node.get_closest_marker("skip_stabilityai") is not None
+    if is_skip_stabilityai_test and "stabilityai" in ecr_image:
+        pytest.skip(
+            f"Skipping because {ecr_image} is StabilityAI image and the test is not StabilityAI test."
+        )
 
 
 @pytest.fixture(autouse=True)
 def skip_by_device_type(request, use_gpu, instance_type, accelerator_type):
-    is_gpu = use_gpu or instance_type[3] in ['g', 'p']
+    is_gpu = use_gpu or instance_type[3] in ["g", "p"]
     is_eia = accelerator_type is not None
-    is_neuron = instance_type.startswith("ml.inf")
 
-    # Separate out cases for clearer logic.
-    # When running Neuron test, skip CPU  and GPU test. 
-    if (request.node.get_closest_marker('neuron_test') and not is_neuron):
-        pytest.skip('Skipping because running on \'{}\' instance'.format(instance_type))
+    is_neuron_inst = instance_type.startswith("ml.inf1")
+    is_neuronx_inst = instance_type.startswith("ml.trn1") or instance_type.startswith("ml.inf2")
+
+    is_neuron_test = request.node.get_closest_marker("neuron_test") is not None
+    is_neuronx_test = request.node.get_closest_marker("neuronx_test") is not None
+
+    if is_neuron_test != is_neuron_inst or is_neuronx_test != is_neuronx_inst:
+        pytest.skip("Skipping because test running on '{}' instance".format(instance_type))
 
     # When running GPU test, skip CPU  and neuron test. When running CPU test, skip GPU  and neuron test.
-    elif (request.node.get_closest_marker('gpu_test') and not is_gpu) or \
-            (request.node.get_closest_marker('cpu_test') and (is_gpu or is_neuron)):
-        pytest.skip('Skipping because running on \'{}\' instance'.format(instance_type))
+    elif (request.node.get_closest_marker("gpu_test") and not is_gpu) or (
+        request.node.get_closest_marker("cpu_test") and is_gpu
+    ):
+        pytest.skip("Skipping because running on '{}' instance".format(instance_type))
 
     # When running EIA test, skip the CPU, GPU and Neuron functions
-    elif (request.node.get_closest_marker('neuron_test') or request.node.get_closest_marker('gpu_test') or request.node.get_closest_marker('cpu_test')) and is_eia:
-        pytest.skip('Skipping because running on \'{}\' instance'.format(instance_type))
+    elif (
+        request.node.get_closest_marker("gpu_test") or request.node.get_closest_marker("cpu_test")
+    ) and is_eia:
+        pytest.skip("Skipping because running on '{}' instance".format(instance_type))
 
     # When running CPU or GPU or Neuron test, skip EIA test.
-    elif request.node.get_closest_marker('eia_test') and not is_eia:
-        pytest.skip('Skipping because running on \'{}\' instance'.format(instance_type))
+    elif request.node.get_closest_marker("eia_test") and not is_eia:
+        pytest.skip("Skipping because running on '{}' instance".format(instance_type))
 
 
 @pytest.fixture(autouse=True)
 def skip_by_py_version(request, py_version):
-    if request.node.get_closest_marker('skip_py2') and 'py2' in py_version:
-        pytest.skip('Skipping the test because Python 2 is not supported.')
+    if request.node.get_closest_marker("skip_py2") and "py2" in py_version:
+        pytest.skip("Skipping the test because Python 2 is not supported.")
 
 
 @pytest.fixture(autouse=True)
 def skip_gpu_instance_restricted_regions(region, instance_type):
-    if ((region in NO_P2_REGIONS and instance_type.startswith('ml.p2'))
-        or (region in NO_P3_REGIONS and instance_type.startswith('ml.p3'))
-            or (region in NO_P4_REGIONS and instance_type.startswith('ml.p4'))):
-                pytest.skip('Skipping GPU test in region {}'.format(region))
+    if (
+        (region in NO_P2_REGIONS and instance_type.startswith("ml.p2"))
+        or (region in NO_P3_REGIONS and instance_type.startswith("ml.p3"))
+        or (region in NO_P4_REGIONS and instance_type.startswith("ml.p4"))
+        or (region not in G5_AVAILABLE_REGIONS and instance_type.startswith("ml.g5"))
+    ):
+        pytest.skip(
+            "Skipping GPU test in region {} with instance type {}".format(region, instance_type)
+        )
 
 
 @pytest.fixture(autouse=True)
 def skip_gpu_py2(request, use_gpu, instance_type, py_version, framework_version):
-    is_gpu = use_gpu or instance_type[3] in ['g', 'p']
-    if request.node.get_closest_marker('skip_gpu_py2') and is_gpu and 'py2' in py_version \
-            and framework_version == '1.4.0':
-        pytest.skip('Skipping the test until mms issue resolved.')
+    is_gpu = use_gpu or instance_type[3] in ["g", "p"]
+    if (
+        request.node.get_closest_marker("skip_gpu_py2")
+        and is_gpu
+        and "py2" in py_version
+        and framework_version == "1.4.0"
+    ):
+        pytest.skip("Skipping the test until mms issue resolved.")
 
 
 def _get_remote_override_flags():
     try:
-        s3_client = boto3.client('s3')
-        sts_client = boto3.client('sts')
-        account_id = sts_client.get_caller_identity().get('Account')
-        result = s3_client.get_object(Bucket=f"dlc-cicd-helper-{account_id}", Key="override_tests_flags.json")
-        json_content = json.loads(result["Body"].read().decode('utf-8'))
+        s3_client = boto3.client("s3")
+        sts_client = boto3.client("sts")
+        account_id = sts_client.get_caller_identity().get("Account")
+        result = s3_client.get_object(
+            Bucket=f"dlc-cicd-helper-{account_id}", Key="override_tests_flags.json"
+        )
+        json_content = json.loads(result["Body"].read().decode("utf-8"))
     except ClientError as e:
         logger.warning("ClientError when performing S3/STS operation: {}".format(e))
         json_content = {}
@@ -327,9 +405,8 @@ def _is_test_disabled(test_name, build_name, version):
     remote_override_flags = _get_remote_override_flags()
     remote_override_build = remote_override_flags.get(build_name, {})
     if version in remote_override_build:
-        return (
-            not remote_override_build[version]
-            or any([test_keyword in test_name for test_keyword in remote_override_build[version]])
+        return not remote_override_build[version] or any(
+            [test_keyword in test_name for test_keyword in remote_override_build[version]]
         )
     return False
 
@@ -352,12 +429,13 @@ def skip_test_successfully_executed_before(request):
     "cache/lastfailed" contains information about failed tests only. We're running SM tests in separate threads for each image.
     So when we retry SM tests, successfully executed tests executed again because pytest doesn't have that info in /.cache.
     But the flag "--last-failed-no-failures all" requires pytest to execute all the available tests.
-    The only sign that a test passed last time - lastfailed file exists and the test name isn't in that file.  
+    The only sign that a test passed last time - lastfailed file exists and the test name isn't in that file.
     The method checks whether lastfailed file exists and the test name is not in it.
     """
     test_name = request.node.name
     lastfailed = request.config.cache.get("cache/lastfailed", None)
 
-    if lastfailed is not None \
-            and not any(test_name in failed_test_name for failed_test_name in lastfailed.keys()):
+    if lastfailed is not None and not any(
+        test_name in failed_test_name for failed_test_name in lastfailed.keys()
+    ):
         pytest.skip(f"Skipping {test_name} because it was successfully executed for this commit")

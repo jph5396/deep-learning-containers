@@ -37,6 +37,7 @@ NO_P2_REGIONS = [
     "cn-northwest-1",
     "eu-south-1",
     "af-south-1",
+    "il-central-1",
 ]
 NO_P3_REGIONS = [
     "ap-northeast-1",
@@ -57,6 +58,7 @@ NO_P3_REGIONS = [
     "cn-northwest-1",
     "eu-south-1",
     "af-south-1",
+    "il-central-1",
 ]
 NO_P4_REGIONS = [
     "ap-northeast-3",
@@ -75,6 +77,16 @@ NO_P4_REGIONS = [
     "cn-northwest-1",
     "eu-south-1",
     "af-south-1",
+    "il-central-1",
+]
+
+# TODO: Expand this list
+G5_AVAILABLE_REGIONS = [
+    "ca-central-1",
+    "us-west-2",
+    "us-east-1",
+    "us-east-2",
+    "eu-west-1",
 ]
 
 
@@ -87,12 +99,19 @@ def pytest_addoption(parser):
     parser.addoption("--processor")
     parser.addoption("--accelerator-type")
     parser.addoption("--tag")
-    parser.addoption("--generate-coverage-doc", default=False, action="store_true",
-                     help="use this option to generate test coverage doc")
     parser.addoption(
-        "--efa", action="store_true", default=False, help="Run only efa tests",
+        "--generate-coverage-doc",
+        default=False,
+        action="store_true",
+        help="use this option to generate test coverage doc",
     )
-    parser.addoption('--sagemaker-regions', default="us-west-2")
+    parser.addoption(
+        "--efa",
+        action="store_true",
+        default=False,
+        help="Run only efa tests",
+    )
+    parser.addoption("--sagemaker-regions", default="us-west-2")
 
 
 def pytest_runtest_setup(item):
@@ -103,8 +122,16 @@ def pytest_runtest_setup(item):
 
 
 def pytest_collection_modifyitems(session, config, items):
+    for item in items:
+        print(f"item {item}")
+        for marker in item.iter_markers(name="team"):
+            print(f"item {marker}")
+            team_name = marker.args[0]
+            item.user_properties.append(("team_marker", team_name))
+            print(f"item.user_properties {item.user_properties}")
     if config.getoption("--generate-coverage-doc"):
         from test.test_utils.test_reporting import TestReportGenerator
+
         report_generator = TestReportGenerator(items, is_sagemaker=True)
         report_generator.generate_coverage_doc(framework="tensorflow", job_type="inference")
 
@@ -112,12 +139,12 @@ def pytest_collection_modifyitems(session, config, items):
 def pytest_configure(config):
     os.environ["TEST_REGION"] = config.getoption("--region")
     os.environ["TEST_VERSIONS"] = config.getoption("--versions") or "1.11.1,1.12.0,1.13.0"
-    os.environ["TEST_INSTANCE_TYPES"] = (config.getoption("--instance-types") or
-                                         "ml.m5.xlarge,ml.p2.xlarge")
+    os.environ["TEST_INSTANCE_TYPES"] = (
+        config.getoption("--instance-types") or "ml.m5.xlarge,ml.p3.xlarge"
+    )
 
     os.environ["TEST_EI_VERSIONS"] = config.getoption("--versions") or "1.11,1.12"
-    os.environ["TEST_EI_INSTANCE_TYPES"] = (config.getoption("--instance-types") or
-                                            "ml.m5.xlarge")
+    os.environ["TEST_EI_INSTANCE_TYPES"] = config.getoption("--instance-types") or "ml.m5.xlarge"
 
     if config.getoption("--tag"):
         os.environ["TEST_VERSIONS"] = config.getoption("--tag")
@@ -125,14 +152,20 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "efa(): explicitly mark to run efa tests")
 
 
+# Nightly fixtures
+@pytest.fixture(scope="session")
+def feature_aws_framework_present():
+    pass
+
+
 @pytest.fixture(scope="session")
 def region(request):
     return request.config.getoption("--region")
 
 
-@pytest.fixture(scope='session', name='sagemaker_regions')
+@pytest.fixture(scope="session", name="sagemaker_regions")
 def sagemaker_regions(request):
-    sagemaker_regions = request.config.getoption('--sagemaker-regions')
+    sagemaker_regions = request.config.getoption("--sagemaker-regions")
     return sagemaker_regions.split(",")
 
 
@@ -144,11 +177,7 @@ def registry(request, region):
     domain_suffix = ".cn" if region in ("cn-north-1", "cn-northwest-1") else ""
     sts_regional_endpoint = "https://sts.{}.amazonaws.com{}".format(region, domain_suffix)
 
-    sts = boto3.client(
-        "sts",
-        region_name=region,
-        endpoint_url=sts_regional_endpoint
-    )
+    sts = boto3.client("sts", region_name=region, endpoint_url=sts_regional_endpoint)
     return sts.get_caller_identity()["Account"]
 
 
@@ -168,7 +197,7 @@ def sagemaker_runtime_client(boto_session):
 
 
 def unique_name_from_base(base, max_length=63):
-    unique = "%04x" % random.randrange(16 ** 4)  # 4-digit hex
+    unique = "%04x" % random.randrange(16**4)  # 4-digit hex
     ts = str(int(time.time()))
     available_length = max_length - 2 - len(ts) - len(unique)
     trimmed = base[:available_length]
@@ -182,35 +211,48 @@ def model_name():
 
 @pytest.fixture(autouse=True)
 def skip_gpu_instance_restricted_regions(region, instance_type):
-    if ((region in NO_P2_REGIONS and instance_type.startswith('ml.p2'))
-        or (region in NO_P3_REGIONS and instance_type.startswith('ml.p3'))
-            or (region in NO_P4_REGIONS and instance_type.startswith('ml.p4'))):
-                pytest.skip('Skipping GPU test in region {}'.format(region))
+    if (
+        (region in NO_P2_REGIONS and instance_type.startswith("ml.p2"))
+        or (region in NO_P3_REGIONS and instance_type.startswith("ml.p3"))
+        or (region in NO_P4_REGIONS and instance_type.startswith("ml.p4"))
+        or (region not in G5_AVAILABLE_REGIONS and instance_type.startswith("ml.g5"))
+    ):
+        pytest.skip(
+            "Skipping GPU test in region {} with instance type {}".format(region, instance_type)
+        )
 
 
 @pytest.fixture(autouse=True)
 def skip_by_device_type(request, instance_type):
     is_gpu = instance_type.lstrip("ml.")[0] in ["g", "p"]
-    is_neuron = instance_type == 'ml.inf1.xlarge'
 
-    #If neuron run only tests marked as neuron
-    if (is_neuron  and not request.node.get_closest_marker("neuron_test")):
-        pytest.skip("Skipping because running on \"{}\" instance".format(instance_type))
-    if (request.node.get_closest_marker("neuron_test") and not is_neuron):
-        pytest.skip("Skipping because running on \"{}\" instance".format(instance_type))
+    # Skip a neuron(x) test that's not on an neuron instance or a test which
+    # uses a neuron instance and is not a neuron(x) test
+    is_neuron_test = request.node.get_closest_marker("neuron_test") is not None
+    is_neuron_instance = instance_type.startswith("ml.inf1")
+    if is_neuron_test != is_neuron_instance:
+        pytest.skip("Skipping because running on '{}' instance".format(instance_type))
 
-    if (request.node.get_closest_marker("skip_gpu") and is_gpu) or \
-            (request.node.get_closest_marker("skip_cpu") and not is_gpu):
-        pytest.skip("Skipping because running on \"{}\" instance".format(instance_type))
+    is_neuronx_test = request.node.get_closest_marker("neuronx_test") is not None
+    is_neuronx_instance = instance_type.startswith("ml.trn1")
+    if is_neuronx_test != is_neuronx_instance:
+        pytest.skip("Skipping because running on '{}' instance".format(instance_type))
+
+    if (request.node.get_closest_marker("skip_gpu") and is_gpu) or (
+        request.node.get_closest_marker("skip_cpu") and not is_gpu
+    ):
+        pytest.skip('Skipping because running on "{}" instance'.format(instance_type))
 
 
 def _get_remote_override_flags():
     try:
-        s3_client = boto3.client('s3')
-        sts_client = boto3.client('sts')
-        account_id = sts_client.get_caller_identity().get('Account')
-        result = s3_client.get_object(Bucket=f"dlc-cicd-helper-{account_id}", Key="override_tests_flags.json")
-        json_content = json.loads(result["Body"].read().decode('utf-8'))
+        s3_client = boto3.client("s3")
+        sts_client = boto3.client("sts")
+        account_id = sts_client.get_caller_identity().get("Account")
+        result = s3_client.get_object(
+            Bucket=f"dlc-cicd-helper-{account_id}", Key="override_tests_flags.json"
+        )
+        json_content = json.loads(result["Body"].read().decode("utf-8"))
     except ClientError as e:
         print("ClientError when performing S3/STS operation: {}".format(e))
         json_content = {}
@@ -237,9 +279,8 @@ def _is_test_disabled(test_name, build_name, version):
     remote_override_flags = _get_remote_override_flags()
     remote_override_build = remote_override_flags.get(build_name, {})
     if version in remote_override_build:
-        return (
-            not remote_override_build[version]
-            or any([test_keyword in test_name for test_keyword in remote_override_build[version]])
+        return not remote_override_build[version] or any(
+            [test_keyword in test_name for test_keyword in remote_override_build[version]]
         )
     return False
 
@@ -262,12 +303,13 @@ def skip_test_successfully_executed_before(request):
     "cache/lastfailed" contains information about failed tests only. We're running SM tests in separate threads for each image.
     So when we retry SM tests, successfully executed tests executed again because pytest doesn't have that info in /.cache.
     But the flag "--last-failed-no-failures all" requires pytest to execute all the available tests.
-    The only sign that a test passed last time - lastfailed file exists and the test name isn't in that file.  
+    The only sign that a test passed last time - lastfailed file exists and the test name isn't in that file.
     The method checks whether lastfailed file exists and the test name is not in it.
     """
     test_name = request.node.name
     lastfailed = request.config.cache.get("cache/lastfailed", None)
 
-    if lastfailed is not None \
-            and not any(test_name in failed_test_name for failed_test_name in lastfailed.keys()):
+    if lastfailed is not None and not any(
+        test_name in failed_test_name for failed_test_name in lastfailed.keys()
+    ):
         pytest.skip(f"Skipping {test_name} because it was successfully executed for this commit")
